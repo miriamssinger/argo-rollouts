@@ -8,6 +8,7 @@ import (
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/utils/strings/slices"
 
 	"github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	"github.com/argoproj/argo-rollouts/rollout/trafficrouting/ambassador"
@@ -218,23 +219,43 @@ func setArgValuePlaceHolder(Args []v1alpha1.Argument) {
 func ValidateIngress(rollout *v1alpha1.Rollout, ingress *ingressutil.Ingress) field.ErrorList {
 	allErrs := field.ErrorList{}
 	fldPath := field.NewPath("spec", "strategy", "canary", "trafficRouting")
+	canary := rollout.Spec.Strategy.Canary
 	var ingressName string
 	var serviceName string
-	if rollout.Spec.Strategy.Canary.TrafficRouting.Nginx != nil {
-		fldPath = fldPath.Child("nginx").Child("stableIngress")
-		serviceName = rollout.Spec.Strategy.Canary.StableService
-		ingressName = rollout.Spec.Strategy.Canary.TrafficRouting.Nginx.StableIngress
-	} else if rollout.Spec.Strategy.Canary.TrafficRouting.ALB != nil {
-		fldPath = fldPath.Child("alb").Child("ingress")
-		ingressName = rollout.Spec.Strategy.Canary.TrafficRouting.ALB.Ingress
-		serviceName = rollout.Spec.Strategy.Canary.StableService
-		if rollout.Spec.Strategy.Canary.TrafficRouting.ALB.RootService != "" {
-			serviceName = rollout.Spec.Strategy.Canary.TrafficRouting.ALB.RootService
-		}
 
-	} else {
-		return allErrs
+	if canary.TrafficRouting.Nginx != nil {
+		additionalIngress := canary.TrafficRouting.Nginx.AdditionalStableIngresses
+		// If there are additional stable Nginx ingresses, and one of them is being validated,
+		// use that ingress name.
+		if len(additionalIngress) > 0 && slices.Contains(additionalIngress, ingress.GetName()) {
+			fldPath = fldPath.Child("nginx").Child("additionalStableIngresses")
+			serviceName = canary.StableService
+			ingressName = ingress.GetName()
+			allErrs = reportErrors(ingress, serviceName, ingressName, fldPath, allErrs)
+		} else {
+			fldPath = fldPath.Child("nginx").Child("stableIngress")
+			serviceName = canary.StableService
+			ingressName = canary.TrafficRouting.Nginx.StableIngress
+			allErrs = reportErrors(ingress, serviceName, ingressName, fldPath, allErrs)
+		}
+		fldPath = fldPath.Child("nginx").Child("stableIngress")
+		serviceName = canary.StableService
+		ingressName = canary.TrafficRouting.Nginx.StableIngress
+
+	} else if canary.TrafficRouting.ALB != nil {
+		fldPath = fldPath.Child("alb").Child("ingress")
+		ingressName = canary.TrafficRouting.ALB.Ingress
+		serviceName = canary.StableService
+		if canary.TrafficRouting.ALB.RootService != "" {
+			serviceName = canary.TrafficRouting.ALB.RootService
+		}
+		allErrs = reportErrors(ingress, serviceName, ingressName, fldPath, allErrs)
 	}
+
+	return allErrs
+}
+
+func reportErrors(ingress *ingressutil.Ingress, serviceName, ingressName string, fldPath *field.Path, allErrs field.ErrorList) field.ErrorList {
 	if !ingressutil.HasRuleWithService(ingress, serviceName) {
 		msg := fmt.Sprintf("ingress `%s` has no rules using service %s backend", ingress.GetName(), serviceName)
 		allErrs = append(allErrs, field.Invalid(fldPath, ingressName, msg))
